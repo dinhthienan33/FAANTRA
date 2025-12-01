@@ -1,6 +1,6 @@
 # Guidelines for the Ball Action Anticipation challenge
 
-Here we present the 1st [Ball Action Anticipation Challenge](). Subscribe (watch) the repo to receive the latest info regarding timeline and prizes!
+Here we present the 1st [Ball Action Anticipation Challenge](https://www.soccer-net.org/challenges/2026#h.1aee06qu1x8) sponsored by [Game On Techonologies](https://game-on.eu/). Subscribe (watch) the repo to receive the latest info regarding timeline and prizes!
 
 We propose the SoccerNet challenge to encourage the development of state-of-the-art algorithm for Generic Soccer Video Understanding.
  - **Ball Action Anticipation**: Given 30 second clips, anticipate the class and timing of the actions occuring in the future 5 seconds out of 10 classes.
