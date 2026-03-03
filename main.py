@@ -37,7 +37,7 @@ def main():
     config = load_json(config_path)
     args = update_args(args, config)
 
-    if args.cpu:
+    if args.cpu or not torch.cuda.is_available():
         device = torch.device('cpu')
         print('using cpu')
     else:

@@ -3,8 +3,20 @@ import argparse
 def get_args():
     # Basic arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument("config", type=str, help="Path to config file")
-    parser.add_argument('model', type=str, help='Model name')
+    parser.add_argument(
+        "config",
+        type=str,
+        nargs="?",
+        default="config/SoccerNetBall/Base-Config-BAA.json",
+        help="Path to config file. Default: config/SoccerNetBall/Base-Config-BAA.json",
+    )
+    parser.add_argument(
+        "model",
+        type=str,
+        nargs="?",
+        default="faantra_bas",
+        help="Model name (used for logging / saving). Default: faantra_bas",
+    )
     parser.add_argument('--seed', type=int, default=42)
     # From FUTR
     parser.add_argument("--cpu", action='store_true', help='run in cpu')

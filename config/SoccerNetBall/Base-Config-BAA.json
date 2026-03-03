@@ -1,7 +1,7 @@
 {
-    "frame_dir": "/Path/To/BAA/Dataset/224p",
-    "save_dir": "/Path/To/Project/save",
-    "store_dir": "/Path/To/BAA/Dataset/224p",
+    "frame_dir": "/workspace/FAANTRA/data/soccernetball/720p",
+    "save_dir": "/workspace/FAANTRA/save",
+    "store_dir": "/workspace/FAANTRA/data/soccernetball/720p",
     "store_mode": "load",
     "batch_size": 4,
     "clip_len": 64,
