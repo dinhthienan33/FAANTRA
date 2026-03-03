@@ -13,3 +13,5 @@ wandb/
 wandb_logs/
 T-Deed-Results/
 .vscode/
+data/
+.env

@@ -3,6 +3,7 @@ scipy
 torch
 einops
 timm
+transformers
 SoccerNet
 wandb
 tabulate
