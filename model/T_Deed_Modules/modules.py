@@ -67,7 +67,9 @@ class SGPBlock(nn.Module):
 
         self.ln = LayerNorm(n_embd)
 
-        self.gn = nn.GroupNorm(16, n_embd)
+        # Use a number of groups that divides n_embd to satisfy GroupNorm constraints
+        num_groups = math.gcd(16, n_embd)
+        self.gn = nn.GroupNorm(num_groups, n_embd)
 
         assert kernel_size % 2 == 1
         # add 1 to avoid have the same size as the instant-level branch
@@ -163,7 +165,9 @@ class SGPMixer(nn.Module):
         self.ln1 = LayerNorm(n_embd)
         self.ln2 = LayerNorm(n_embd)
 
-        self.gn = nn.GroupNorm(16, n_embd)
+        # Use a number of groups that divides n_embd to satisfy GroupNorm constraints
+        num_groups = math.gcd(16, n_embd)
+        self.gn = nn.GroupNorm(num_groups, n_embd)
 
         assert kernel_size % 2 == 1
         # add 1 to avoid have the same size as the instant-level branch
