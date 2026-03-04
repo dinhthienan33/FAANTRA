@@ -106,14 +106,21 @@ class FUTR(nn.Module):
 
         # Preprocessing
         # Augmentations
-        self.augmentation = T.Compose([
+        base_augs = [
             T.RandomApply([T.ColorJitter(hue = 0.2)], p = 0.25),
             T.RandomApply([T.ColorJitter(saturation = (0.7, 1.2))], p = 0.25),
             T.RandomApply([T.ColorJitter(brightness = (0.7, 1.2))], p = 0.25),
             T.RandomApply([T.ColorJitter(contrast = (0.7, 1.2))], p = 0.25),
             T.RandomApply([T.GaussianBlur(5)], p = 0.25),
             T.RandomHorizontalFlip(),
-        ])
+        ]
+        # Phase 1: Extended augmentations for stronger regularization
+        if getattr(args, 'extended_augmentation', False):
+            base_augs.extend([
+                T.RandomApply([T.RandomErasing(p=1.0, scale=(0.02, 0.15), ratio=(0.3, 3.3))], p=0.2),
+                T.RandomApply([T.RandomPerspective(distortion_scale=0.1)], p=0.15),
+            ])
+        self.augmentation = T.Compose(base_augs)
         #Standarization
         self.standarization = T.Compose([
             T.Normalize(mean = (0.485, 0.456, 0.406), std = (0.229, 0.224, 0.225)) #Imagenet mean and std

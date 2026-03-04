@@ -22,7 +22,15 @@ def train(args, model, train_loader, val_loader, optimizer, scheduler, criterion
     model.train()
     best_mAP = best_mAP
     best_model_path = best_model_path
-    print("Training Start")
+
+    # Phase 1: Gradient accumulation and clipping config
+    accum_steps = getattr(args, 'gradient_accumulation_steps', 1)
+    grad_clip_norm = getattr(args, 'grad_clip_norm', 0.0)
+    focal_gamma = getattr(args, 'focal_gamma', 2.0)
+    label_smoothing = getattr(args, 'label_smoothing', 0.0)
+
+    print(f"Training Start (accum_steps={accum_steps}, grad_clip={grad_clip_norm}, "
+          f"loss_func={loss_func}, focal_gamma={focal_gamma}, label_smoothing={label_smoothing})")
     for epoch in range(start_epoch, args.epochs):
 
         ########################################
@@ -47,7 +55,9 @@ def train(args, model, train_loader, val_loader, optimizer, scheduler, criterion
         for i, data in enumerate(train_loop):
             step_log_dict = {"train/step": epoch*len(train_loader) + i+1}
             postfix_kwargs = {"loss": 0}
-            optimizer.zero_grad()
+            # Phase 1: Only zero gradients at accumulation boundaries
+            if i % accum_steps == 0:
+                optimizer.zero_grad()
             features, past_label, trans_off_future, trans_future_target, target_actionness = data
             features = features.to(device) #[B, S, C]
             past_label = past_label.to(device) #[B, S]
@@ -73,7 +83,8 @@ def train(args, model, train_loader, val_loader, optimizer, scheduler, criterion
                 target_past_label = past_label.view(-1)
                 class_weights = torch.tensor(args.class_weights, device=device)
                 # Calculate loss and accuracy
-                loss_seg, n_seg_correct, n_seg_total, seg_class_stats = cal_performance(output_seg, target_past_label, pad_idx, class_weights=class_weights)
+                loss_seg, n_seg_correct, n_seg_total, seg_class_stats = cal_performance(output_seg, target_past_label, pad_idx, class_weights=class_weights,
+                                                                                         label_smoothing=label_smoothing)
                 losses += loss_seg
                 total_seg += n_seg_total
                 total_seg_correct += n_seg_correct
@@ -122,9 +133,11 @@ def train(args, model, train_loader, val_loader, optimizer, scheduler, criterion
                 class_weights[0] = args.eos_weight  # Replace background weight with EOS weight
                 # Calculate prediction loss and accuracy
                 if use_actionness or BCE_with_actionness:
-                    loss, n_correct, n_total, class_stats = cal_performance(output, target, pad_idx, loss_func=loss_func, class_weights=class_weights[1:], actionness=True)
+                    loss, n_correct, n_total, class_stats = cal_performance(output, target, pad_idx, loss_func=loss_func, class_weights=class_weights[1:], actionness=True,
+                                                                            focal_gamma=focal_gamma, label_smoothing=label_smoothing)
                 else:
-                    loss, n_correct, n_total, class_stats = cal_performance(output, target, pad_idx, loss_func=loss_func, class_weights=class_weights, actionness=use_actionness)
+                    loss, n_correct, n_total, class_stats = cal_performance(output, target, pad_idx, loss_func=loss_func, class_weights=class_weights, actionness=use_actionness,
+                                                                            focal_gamma=focal_gamma, label_smoothing=label_smoothing)
                 acc = 1 if n_total == 0 else n_correct / n_total
                 # Actionness gets NaN CE_loss at the start of an epoch and I do not know why.
                 # So this is how I chose to sweep the issue under the rug
@@ -199,8 +212,15 @@ def train(args, model, train_loader, val_loader, optimizer, scheduler, criterion
 
             # Back propagate loss
             epoch_loss += losses.item()
-            losses.backward()
-            optimizer.step()
+            # Phase 1: Scale loss for gradient accumulation
+            scaled_loss = losses / accum_steps
+            scaled_loss.backward()
+            # Phase 1: Only step optimizer at accumulation boundaries
+            if (i + 1) % accum_steps == 0 or (i + 1) == len(train_loader):
+                if grad_clip_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+                optimizer.step()
+                scheduler.step()
             # Record and display full training statistics for the iteration
             step_log_dict["train/full_loss"] = losses.item()
             postfix_kwargs["loss"] = losses.item()
@@ -214,7 +234,6 @@ def train(args, model, train_loader, val_loader, optimizer, scheduler, criterion
                 inv_class_dict[0] = "EOS"
                 step_log_dict = log_class_metrics(step_log_dict, class_stats, "train/anticipate", inv_class_dict)
             wandb.log(step_log_dict)
-            scheduler.step()
 
 
         ########################################
@@ -266,7 +285,8 @@ def train(args, model, train_loader, val_loader, optimizer, scheduler, criterion
                     target_past_label = past_label.view(-1)
                     class_weights = torch.tensor(args.class_weights, device=device)
                     # Calculate loss and accuracy
-                    loss_seg, n_seg_correct, n_seg_total, seg_class_stats = cal_performance(output_seg, target_past_label, pad_idx, class_weights=class_weights)
+                    loss_seg, n_seg_correct, n_seg_total, seg_class_stats = cal_performance(output_seg, target_past_label, pad_idx, class_weights=class_weights,
+                                                                                             label_smoothing=label_smoothing)
                     losses += loss_seg
                     val_total_seg += n_seg_total
                     val_total_seg_correct += n_seg_correct
@@ -315,9 +335,11 @@ def train(args, model, train_loader, val_loader, optimizer, scheduler, criterion
                     class_weights[0] = args.eos_weight  # Replace background weight with EOS weight
                     # Calculate prediction loss and accuracy
                     if use_actionness or BCE_with_actionness:
-                        loss, n_correct, n_total, class_stats = cal_performance(output, target, pad_idx, loss_func=loss_func, class_weights=class_weights[1:], actionness=True)
+                        loss, n_correct, n_total, class_stats = cal_performance(output, target, pad_idx, loss_func=loss_func, class_weights=class_weights[1:], actionness=True,
+                                                                                focal_gamma=focal_gamma, label_smoothing=label_smoothing)
                     else:
-                        loss, n_correct, n_total, class_stats = cal_performance(output, target, pad_idx, loss_func=loss_func, class_weights=class_weights, actionness=use_actionness)
+                        loss, n_correct, n_total, class_stats = cal_performance(output, target, pad_idx, loss_func=loss_func, class_weights=class_weights, actionness=use_actionness,
+                                                                                focal_gamma=focal_gamma, label_smoothing=label_smoothing)
                     acc = 1 if n_total == 0 else n_correct / n_total
                     # Actionness gets NaN CE_loss at the start of an epoch and I do not know why.
                     # So this is how I chose to sweep the issue under the rug
