@@ -218,6 +218,3 @@ class FUTR(nn.Module):
 
 def get_pad_mask(seq, pad_idx):
     return (seq ==pad_idx)
-
-
-

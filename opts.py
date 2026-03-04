@@ -110,6 +110,9 @@ def update_args(args, config):
     assert not (args.anticipate_background and args.actionness), "Can't anticipate background and use actionness at the same time"
     if args.use_anchors: assert (args.use_anchors and (args.anticipate_background or args.actionness)), "Cannot use anchors with EOS, needs to use background or actionness"
     args.start_map_epoch = config.get("start_map_epoch", 20) # Which epoch to start saving checkpoints and running mAP calculations on validation set
+    args.use_hf = config.get("use_hf", False)  # Use HuggingFace video model (VideoMAE/TimeSformer) instead of FUTR
+    args.hf_backbone = config.get("hf_backbone", "videomae")  # videomae or timesformer
+    args.gpu_id = config.get("gpu_id", 0)  # GPU index for HF training
     args.mask_attn = config.get("mask_attn", False) # Mask attention for the transformer
     args.mask_attn_window_src = config.get("mask_attn_window_src", 0) # Window size for encoder attention masking
     args.mask_attn_window_tgt = config.get("mask_attn_window_tgt", 0) # Window size for decoder attention masking

@@ -1,3 +1,4 @@
+from model.hf_video_models import HFVideoMAEClassifier
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -10,6 +11,7 @@ from torch.optim.lr_scheduler import (
 from model.futr import FUTR
 from train import train
 from train_dual import train_dual
+from train_hf import train as train_hf
 from eval import evaluate
 from eval_BAA import evaluate_BAA
 from util.io import load_json
@@ -97,12 +99,14 @@ def main():
             end = min(args.n_query, i + (args.mask_attn_window_tgt//2) + 1)
             tgt_attn_mask[i, start:end] = False
 
-    # Model specification
-    model = FUTR(n_class, args.hidden_dim, device=device, args=args, src_pad_idx=pad_idx,
-                            n_query=args.n_query, n_head=args.n_head,
-                            num_encoder_layers=args.n_encoder_layer, num_decoder_layers=args.n_decoder_layer,
-                            src_attn_mask=src_attn_mask, tgt_attn_mask=tgt_attn_mask).to(device)
-
+    if getattr(args, 'use_hf', False):
+        model = HFVideoMAEClassifier(num_classes=n_class)
+    else :
+        model = FUTR(n_class, args.hidden_dim, device=device, args=args, src_pad_idx=pad_idx,
+                    n_query=args.n_query, n_head=args.n_head,
+                    num_encoder_layers=args.n_encoder_layer, num_decoder_layers=args.n_decoder_layer,
+                    src_attn_mask=src_attn_mask, tgt_attn_mask=tgt_attn_mask).to(device)
+        
     model_save_path = os.path.join(args.save_dir + 'model/transformer')
     results_save_path = os.path.join(args.save_dir + '/results/transformer')
     if not os.path.exists(results_save_path):
@@ -159,6 +163,13 @@ def main():
     if start_epoch < args.epochs:
         if args.jointtrain is not None:
             model, best_model_path = train_dual(args, model, train_loader, val_loader, optimizer, scheduler, criterion,
+                                        model_save_path, pad_idx, device, int(args.pred_perc*args.clip_len),
+                                        n_class, actions_dict, args.n_query, start_epoch=start_epoch,
+                                        offset_loss_weight=args.offset_loss_weight, use_actionness=args.actionness,
+                                        use_anchors=args.use_anchors, loss_func=args.loss_func ,best_mAP=best_mAP,
+                                        best_model_path=best_model_path)
+        elif args.use_hf:
+            model, best_model_path = train_hf(args, model, train_loader, val_loader, optimizer, scheduler, criterion,
                                         model_save_path, pad_idx, device, int(args.pred_perc*args.clip_len),
                                         n_class, actions_dict, args.n_query, start_epoch=start_epoch,
                                         offset_loss_weight=args.offset_loss_weight, use_actionness=args.actionness,

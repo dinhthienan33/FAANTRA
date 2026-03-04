@@ -26,6 +26,7 @@ class HFVideoMAEClassifier(nn.Module):
         )
         hidden_size = self.model.config.hidden_size
         self.model.classifier = nn.Linear(hidden_size, num_classes)
+        self.model.config.num_labels = num_classes
 
     def forward(
         self,
@@ -70,6 +71,7 @@ class HFTimesformerClassifier(nn.Module):
         )
         hidden_size = self.model.config.hidden_size
         self.model.classifier = nn.Linear(hidden_size, num_classes)
+        self.model.config.num_labels = num_classes
 
     def forward(
         self,
