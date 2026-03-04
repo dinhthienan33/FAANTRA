@@ -1,7 +1,7 @@
 {
-    "frame_dir": "/workspace/FAANTRA/data/soccernetball/720p",
+    "frame_dir": "/workspace/FAANTRA/data/soccernetball/224p",
     "save_dir": "/workspace/FAANTRA/save_20_hf",
-    "store_dir": "/workspace/FAANTRA/data/soccernetball/720p",
+    "store_dir": "/workspace/FAANTRA/data/soccernetball/224p",
     "store_mode": "load",
     "batch_size": 8,
     "clip_len": 64,

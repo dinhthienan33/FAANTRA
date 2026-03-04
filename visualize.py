@@ -2,7 +2,7 @@
 """
 Visualize Labels-ball.json annotations on videos.
 Usage:
-  python visualize.py path/to/Labels-ball.json path/to/video_folder [--output out.mp4] [--video-idx 0] [--fps 25]
+  python visualize.py /workspace/FAANTRA/data/soccernetball/224p/train/Labels-ball.json /workspace/FAANTRA/data/soccernetball/224p/train --output out.mp4 [--video-idx 0] [--fps 25]
 """
 
 import argparse
@@ -30,16 +30,20 @@ def visualize_video(
     output_path: str | None = None,
     video_idx: int = 0,
     fps: float = FPS,
+    save_frames: bool = False,
 ):
     data = load_labels(labels_path)
     videos = data.get("videos", [])
     if video_idx >= len(videos):
         raise ValueError(f"video_idx {video_idx} >= {len(videos)} videos")
+
     video_info = videos[video_idx]
     rel_path = video_info.get("path", "")
     video_path = os.path.join(video_folder, rel_path)
+
     if not os.path.isfile(video_path):
         raise FileNotFoundError(f"Video not found: {video_path}")
+
     annotations = video_info.get("annotations", {})
     obs = annotations.get("observation", [])
     ant = annotations.get("anticipation", [])
@@ -47,76 +51,77 @@ def visualize_video(
     cap = cv2.VideoCapture(video_path)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
     out = None
     if output_path:
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
     frame_idx = 0
+
     obs_by_frame = {}
     for a in obs:
         f = ms_to_frame(a["position"], fps)
         obs_by_frame.setdefault(f, []).append(a)
+
     ant_by_frame = {}
     for a in ant:
         f = ms_to_frame(a["position"], fps)
         ant_by_frame.setdefault(f, []).append(a)
 
-    print(f"Visualizing: {video_path}")
+    print(f"Processing: {video_path}")
     print(f"Observation events: {len(obs)}, Anticipation events: {len(ant)}")
-    print("Press 'q' to quit, 's' to save frame")
+
     while True:
         ret, frame = cap.read()
         if not ret:
             break
+
         frame = frame.copy()
         ts_ms = frame_idx * 1000 / fps
+
         cv2.putText(
-            frame, f"Frame {frame_idx} | {ts_ms:.0f}ms",
-            (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA
-        )
-        cv2.putText(
-            frame, f"Frame {frame_idx} | {ts_ms:.0f}ms",
-            (22, 37), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 1, cv2.LINE_AA
+            frame,
+            f"Frame {frame_idx} | {ts_ms:.0f}ms",
+            (20, 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
         )
 
         if frame_idx in obs_by_frame:
             for i, ann in enumerate(obs_by_frame[frame_idx]):
-                label = ann.get("label", "")
-                team = ann.get("team", "")
-                text = f"OBS: {label} ({team})"
+                text = f"OBS: {ann.get('label','')} ({ann.get('team','')})"
                 y = 70 + i * 35
                 cv2.rectangle(frame, (45, y - 28), (width - 20, y + 5), (0, 165, 255), -1)
-                cv2.putText(frame, text, (50, y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2, cv2.LINE_AA)
+                cv2.putText(frame, text, (50, y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2, cv2.LINE_AA)
 
         if frame_idx in ant_by_frame:
+            offset = len(obs_by_frame.get(frame_idx, []))
             for i, ann in enumerate(ant_by_frame[frame_idx]):
-                label = ann.get("label", "")
-                team = ann.get("team", "")
-                text = f"ANT: {label} ({team})"
-                y = 70 + (len(obs_by_frame.get(frame_idx, [])) + i) * 35
+                text = f"ANT: {ann.get('label','')} ({ann.get('team','')})"
+                y = 70 + (offset + i) * 35
                 cv2.rectangle(frame, (45, y - 28), (width - 20, y + 5), (0, 255, 0), -1)
-                cv2.putText(frame, text, (50, y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2, cv2.LINE_AA)
+                cv2.putText(frame, text, (50, y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2, cv2.LINE_AA)
+
+        if save_frames:
+            os.makedirs("frames", exist_ok=True)
+            cv2.imwrite(f"frames/frame_{frame_idx:06d}.jpg", frame)
 
         if out:
             out.write(frame)
 
-        cv2.imshow("Labels-ball", frame)
-        key = cv2.waitKey(int(1000 / fps)) & 0xFF
-        if key == ord("q"):
-            break
-        if key == ord("s"):
-            save_path = f"frame_{frame_idx:06d}.jpg"
-            cv2.imwrite(save_path, frame)
-            print(f"Saved {save_path}")
         frame_idx += 1
 
     cap.release()
+
     if out:
         out.release()
         print(f"Saved video to {output_path}")
-    cv2.destroyAllWindows()
 
 
 def main():

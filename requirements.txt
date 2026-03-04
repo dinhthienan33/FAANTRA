@@ -8,3 +8,4 @@ SoccerNet
 wandb
 tabulate
 pyzipper
+opencv-python
