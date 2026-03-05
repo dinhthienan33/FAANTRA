@@ -116,5 +116,23 @@ def update_args(args, config):
     args.mask_attn = config.get("mask_attn", False) # Mask attention for the transformer
     args.mask_attn_window_src = config.get("mask_attn_window_src", 0) # Window size for encoder attention masking
     args.mask_attn_window_tgt = config.get("mask_attn_window_tgt", 0) # Window size for decoder attention masking
-    
+
+    # ====================================================
+    # Phase 1: Quick Wins — new config parameters
+    # ====================================================
+    # Focal Loss parameters
+    args.focal_gamma = config.get("focal_gamma", 2.0)  # Focusing parameter for Focal Loss. Higher = more focus on hard examples
+
+    # Label smoothing for CE/Focal loss (0.0 = no smoothing)
+    args.label_smoothing = config.get("label_smoothing", 0.0)
+
+    # Gradient accumulation to simulate larger batch sizes without extra GPU memory
+    args.gradient_accumulation_steps = config.get("gradient_accumulation_steps", 1)
+
+    # Gradient clipping max norm (0 = disabled)
+    args.grad_clip_norm = config.get("grad_clip_norm", 0.0)
+
+    # Extended augmentation beyond baseline (RandomErasing, RandomPerspective)
+    args.extended_augmentation = config.get("extended_augmentation", False)
+
     return args

@@ -142,7 +142,10 @@ def main():
     
     # Create scheduler
     num_steps_per_epoch = len(train_loader)
-    scheduler = get_lr_scheduler(args, optimizer, num_steps_per_epoch)
+    # Phase 1: Adjust scheduler steps for gradient accumulation
+    accum_steps = getattr(args, 'gradient_accumulation_steps', 1)
+    effective_steps_per_epoch = (num_steps_per_epoch + accum_steps - 1) // accum_steps
+    scheduler = get_lr_scheduler(args, optimizer, effective_steps_per_epoch)
     
     # Load parameters from checkpoint
     start_epoch = 0

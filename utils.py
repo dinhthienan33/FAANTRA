@@ -10,15 +10,82 @@ import pdb
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 
+
+# ====================================================
+# Phase 1: Effective Number of Samples Class Weighting
+# Based on Cui et al., "Class-Balanced Loss Based on
+# Effective Number of Samples", CVPR 2019
+# ====================================================
+def compute_effective_weights(class_counts, beta=0.9999):
+    """Compute class weights using effective number of samples.
+
+    Args:
+        class_counts: array-like of per-class sample counts
+        beta: hyperparameter in [0, 1). Higher = more rebalancing.
+    Returns:
+        numpy array of normalized class weights
+    """
+    class_counts = np.array(class_counts, dtype=np.float64)
+    class_counts = np.maximum(class_counts, 1.0)
+    effective_num = 1.0 - np.power(beta, class_counts)
+    weights = (1.0 - beta) / effective_num
+    weights = weights / np.sum(weights) * len(weights)
+    return weights
+
+
+# ====================================================
+# Phase 1: Focal Loss
+# Based on Lin et al., "Focal Loss for Dense Object
+# Detection", ICCV 2017
+# ====================================================
+def focal_loss(pred, gold, trg_pad_idx, class_weights=None, gamma=2.0, label_smoothing=0.0):
+    """Focal Loss: down-weights easy (well-classified) examples.
+
+    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+
+    Args:
+        pred: [N, C] logits
+        gold: [N] class indices
+        trg_pad_idx: padding index to ignore
+        class_weights: optional per-class alpha weights
+        gamma: focusing parameter (0 = standard CE, 2 = default)
+        label_smoothing: label smoothing factor
+    """
+    non_pad_mask = gold.ne(trg_pad_idx)
+    if non_pad_mask.sum() == 0:
+        return torch.tensor(0.0, device=pred.device, requires_grad=True)
+
+    pred_valid = pred[non_pad_mask]
+    gold_valid = gold[non_pad_mask]
+
+    # Standard CE per-sample (no reduction)
+    ce_loss = F.cross_entropy(
+        pred_valid, gold_valid, weight=class_weights,
+        reduction='none', label_smoothing=label_smoothing
+    )
+
+    # p_t = probability of the correct class
+    log_pt = -ce_loss
+    pt = torch.exp(log_pt)
+
+    # Focal modulating factor
+    focal_weight = (1.0 - pt) ** gamma
+    loss = focal_weight * ce_loss
+
+    return loss.mean()
+
+
 def normalize_offset(input, mask, max_frames):
     output = (input/max_frames)*mask
     output = torch.exp(output)*mask
     return output
 
-def cal_performance(pred, gold, trg_pad_idx, loss_func="CE", class_weights = None, calc_loss=True, actionness=False):
+def cal_performance(pred, gold, trg_pad_idx, loss_func="CE", class_weights = None, calc_loss=True, actionness=False,
+                    focal_gamma=2.0, label_smoothing=0.0):
     # Modifid version of https://github.com/jadore801120/attention-is-all-you-need-pytorch
     '''Apply label smoothing if needed'''
-    if calc_loss:   loss = cal_loss(pred, gold.long(), trg_pad_idx, loss_func=loss_func, class_weights=class_weights)
+    if calc_loss:   loss = cal_loss(pred, gold.long(), trg_pad_idx, loss_func=loss_func, class_weights=class_weights,
+                                    focal_gamma=focal_gamma, label_smoothing=label_smoothing)
     else:           loss = 0
     C = pred.shape[1]
     pred = pred.max(1)[1]           # Technically this is just argmax, because the [1] of max is the indices
@@ -40,9 +107,10 @@ def cal_performance(pred, gold, trg_pad_idx, loss_func="CE", class_weights = Non
 
     return loss, n_correct, n_word, class_wise
 
-def cal_loss(pred, gold, trg_pad_idx, loss_func="CE", class_weights=None):
+def cal_loss(pred, gold, trg_pad_idx, loss_func="CE", class_weights=None,
+             focal_gamma=2.0, label_smoothing=0.0):
     # Modified version of https://github.com/jadore801120/attention-is-all-you-need-pytorch
-    '''Calculate cross entropy or binary cross entropy loss, apply label smoothing if needed'''
+    '''Calculate cross entropy, focal, or binary cross entropy loss'''
 
     # Weighting not implemented with smoothing
     if loss_func == "smoothing":
@@ -61,9 +129,14 @@ def cal_loss(pred, gold, trg_pad_idx, loss_func="CE", class_weights=None):
         loss = loss / non_pad_mask.sum()
     elif loss_func == "CE":
         if class_weights is None:
-            loss = F.cross_entropy(pred, gold, ignore_index=trg_pad_idx)
+            loss = F.cross_entropy(pred, gold, ignore_index=trg_pad_idx,
+                                   label_smoothing=label_smoothing)
         else:
-            loss = F.cross_entropy(pred, gold, ignore_index=trg_pad_idx, weight=class_weights)
+            loss = F.cross_entropy(pred, gold, ignore_index=trg_pad_idx, weight=class_weights,
+                                   label_smoothing=label_smoothing)
+    elif loss_func == "focal":
+        loss = focal_loss(pred, gold, trg_pad_idx, class_weights=class_weights,
+                          gamma=focal_gamma, label_smoothing=label_smoothing)
     elif loss_func == "BCE":
         B, C = pred.shape
         non_pad_mask = gold.ne(trg_pad_idx)
