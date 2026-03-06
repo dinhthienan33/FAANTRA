@@ -50,12 +50,13 @@ def extract_split(split, download_key, download_path, delete_videos=False):
         os.remove(split_path)
         print(f"Deleted {split} zip file to save space")
 
-def export_clip(clip, delete_videos, low_res, download_path, frame_size):
+def export_clip(clip, split, delete_videos, low_res, download_path, frame_size):
     """
     Export frames from a single clip using the specified resolution.
     
     Args:
         clip (str): The folder name of the clip to export frames from.
+        split (str): The split name (train, valid, test, or challenge).
         delete_videos (bool): Whether to delete the downloaded videos after exporting frames.
         low_res (bool): Whether the clip is in 224p or 720p resolution.
         download_path (str): The directory where the dataset is downloaded.
@@ -101,7 +102,7 @@ def export_frames(split, download_path, delete_videos=False, frame_size="448p", 
         print(f"Could not find anything to export in the path {os.path.join(download_path, split)}")
         return
     with mp.Pool(num_cpus) as p:
-        p.starmap(export_clip, zip(clips, repeat(delete_videos), repeat(low_res), repeat(download_path), repeat(frame_size)))
+        p.starmap(export_clip, zip(clips, repeat(split), repeat(delete_videos), repeat(low_res), repeat(download_path), repeat(frame_size)))
         
 
 
@@ -161,7 +162,30 @@ if __name__ == "__main__":
         type=int,
         default=4,
         help="Number of CPUs to use when exporting clips"
-
+    )
+    parser.add_argument(
+        "--feature",
+        action="store_true",
+        help="Extract and save RegNet features after exporting frames. Requires frames to exist.",
+    )
+    parser.add_argument(
+        "--feature-arch",
+        type=str,
+        default="rny006_gsf",
+        choices=["rny002_gsf", "rny004_gsf", "rny006_gsf", "rny008_gsf"],
+        help="RegNet backbone for feature extraction (default: rny006_gsf)",
+    )
+    parser.add_argument(
+        "--feature-clip-len",
+        type=int,
+        default=64,
+        help="Clip length in frames for feature extraction (default: 64)",
+    )
+    parser.add_argument(
+        "--dataset-path",
+        type=str,
+        default="data",
+        help="Path to data folder with soccernetballanticipation/ (default: data)",
     )
     args = parser.parse_args()
     print("Supplied arguments:", args)
@@ -186,3 +210,23 @@ if __name__ == "__main__":
             download_split(split, args.download_path, frame_size_path)
             extract_split(split, args.download_key, os.path.join(args.download_path, frame_size_path), args.delete_videos)
         export_frames(split, os.path.join(args.download_path, frame_size_path), args.delete_videos, args.frame_size, args.cpus)
+
+    if args.feature:
+        frame_dir = os.path.join(args.download_path, frame_size_path)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        extract_script = os.path.join(script_dir, "extract_features.py")
+        if not os.path.exists(extract_script):
+            print(f"Warning: {extract_script} not found. Skipping feature extraction.")
+        else:
+            cmd = [
+                "python", extract_script,
+                "--frame-dir", frame_dir,
+                "--store-dir", frame_dir,
+                "--dataset-path", args.dataset_path,
+                "--clip-len", str(args.feature_clip_len),
+                "--feature-arch", args.feature_arch,
+                "--build-clips",
+                "--splits", *splits,
+            ]
+            print(f"Running feature extraction: {' '.join(cmd)}")
+            subprocess.run(cmd, check=True)
