@@ -135,4 +135,34 @@ def update_args(args, config):
     # Extended augmentation beyond baseline (RandomErasing, RandomPerspective)
     args.extended_augmentation = config.get("extended_augmentation", False)
 
+    # ====================================================
+    # Phase 2: Feature Extraction Upgrade — new config parameters
+    # ====================================================
+
+    # Resolution / resize control (applied in dataset frame readers)
+    # Format: [H, W] (e.g., [448, 796]). None = keep original frame size.
+    args.resolution = config.get("resolution", None)
+    if args.resolution is not None:
+        assert isinstance(args.resolution, list) and len(args.resolution) == 2, "resolution must be [H, W]"
+        args.resolution = [int(args.resolution[0]), int(args.resolution[1])]
+
+    # Gradient checkpointing: trade compute for memory — enables higher resolution / larger backbones
+    args.gradient_checkpointing = config.get("gradient_checkpointing", False)
+
+    # Backbone freezing: freeze backbone for N epochs, then unfreeze for end-to-end fine-tuning
+    args.freeze_backbone = config.get("freeze_backbone", False)
+    args.unfreeze_backbone_epoch = config.get("unfreeze_backbone_epoch", -1)  # -1 = never unfreeze
+
+    # Separate backbone learning rate (lower LR for pretrained backbone, higher for new layers)
+    args.backbone_lr_multiplier = config.get("backbone_lr_multiplier", 1.0)
+
+    # VideoMAE-specific parameters
+    args.videomae_model_name = config.get("videomae_model_name", "MCG-NJU/videomae-base-finetuned-kinetics")
+    args.videomae_pool = config.get("videomae_pool", "mean")  # 'mean' or 'cls'
+
+    # Pre-extracted features mode (for InternVideo2 or other large frozen encoders)
+    args.use_preextracted_features = config.get("use_preextracted_features", False)
+    args.preextracted_feat_dim = config.get("preextracted_feat_dim", 768)
+    args.preextracted_feature_dir = config.get("preextracted_feature_dir", "")
+
     return args

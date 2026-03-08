@@ -33,6 +33,12 @@ def train(args, model, train_loader, val_loader, optimizer, scheduler, criterion
           f"loss_func={loss_func}, focal_gamma={focal_gamma}, label_smoothing={label_smoothing})")
     for epoch in range(start_epoch, args.epochs):
 
+        # Phase 2: Check if backbone should be unfrozen at this epoch
+        if hasattr(model, 'module'):
+            model.module.maybe_unfreeze_backbone(epoch)
+        else:
+            model.maybe_unfreeze_backbone(epoch)
+
         ########################################
         # Training
         ########################################

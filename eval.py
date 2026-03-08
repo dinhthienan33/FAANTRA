@@ -113,8 +113,10 @@ def evaluate(split, model, n_class, classes_dict, pad_index, args, overlap=0.5, 
                 classes_dict, split_path, args.frame_dir, args.clip_len,
                 int(args.clip_len*args.cheating_range[0]) if args.cheating_dataset else 0,
                 int(args.clip_len*args.cheating_range[1]) if args.cheating_dataset else obs_len,
-                overlap_len = int(args.clip_len*overlap),    # overlap_len is number of frames to overlap
-                stride = STRIDE_SNB, dataset = args.dataset)
+                overlap_len=int(args.clip_len*overlap),    # overlap_len is number of frames to overlap
+                stride=STRIDE_SNB, dataset=args.dataset,
+                resolution=getattr(args, "resolution", None),
+        )
         if not split_data._dataset == 'soccernetball':
             raise NotImplementedError(f'Evaluation for {split_data._dataset} is not implemented yet.')
         

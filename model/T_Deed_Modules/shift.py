@@ -69,7 +69,10 @@ class GatedShift(nn.Module):
             channels = net.conv1.in_channels
         elif isinstance(net, torchvision.ops.misc.ConvNormActivation):
             channels = net[0].in_channels
-        elif isinstance(net, timm.layers.conv_bn_act.ConvBnAct):
+        elif hasattr(timm, 'layers') and isinstance(net, timm.layers.conv_bn_act.ConvBnAct):
+            channels = net.conv.in_channels
+        elif hasattr(net, 'conv') and isinstance(net.conv, nn.Conv2d):
+            # timm < 0.6 uses timm.models.layers.ConvBnAct with .conv attribute
             channels = net.conv.in_channels
         elif isinstance(net, nn.Conv2d):
             channels = net.in_channels

@@ -115,7 +115,28 @@ def main():
 
     model = nn.DataParallel(model).to(device)
 
-    optimizer = torch.optim.AdamW(model.parameters(), args.lr, weight_decay=args.weight_decay)
+    # Phase 2: Separate learning rate for backbone vs rest of model
+    backbone_lr_mult = getattr(args, 'backbone_lr_multiplier', 1.0)
+    if backbone_lr_mult != 1.0:
+        # Split parameters into backbone and non-backbone groups
+        backbone_params = []
+        other_params = []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            # DataParallel wraps as module.features.*
+            if '.features.' in name:
+                backbone_params.append(param)
+            else:
+                other_params.append(param)
+        param_groups = [
+            {'params': backbone_params, 'lr': args.lr * backbone_lr_mult},
+            {'params': other_params, 'lr': args.lr},
+        ]
+        optimizer = torch.optim.AdamW(param_groups, lr=args.lr, weight_decay=args.weight_decay)
+        print(f'=> Separate LR: backbone={args.lr * backbone_lr_mult:.6f}, rest={args.lr:.6f}')
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), args.lr, weight_decay=args.weight_decay)
     criterion = nn.MSELoss(reduction = 'none')  # Criterion is used for offset loss
 
     # Training

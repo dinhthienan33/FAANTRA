@@ -110,7 +110,11 @@ def evaluate_BAA(split, model, n_class, classes_dict, pad_index, args, test=Fals
         model_head1_sizes = [n_class, n_class - 1*args.actionness]      # Used in case model was trained with dual dataset
 
         # Get evaluation dataset
-        split_data = ActionAnticipationVideoDataset(classes_dict, split_path, args.frame_dir, obs_len, stride = STRIDE_SNBA, dataset = args.dataset)
+        split_data = ActionAnticipationVideoDataset(
+            classes_dict, split_path, args.frame_dir, obs_len,
+            stride=STRIDE_SNBA, dataset=args.dataset,
+            resolution=getattr(args, "resolution", None),
+        )
         if split_data._dataset == 'soccernetball':
             raise NotImplementedError(f'To evaluate on the soccernetball dataset use the eval.py file.')
         elif not split_data._dataset == 'soccernetballanticipation':

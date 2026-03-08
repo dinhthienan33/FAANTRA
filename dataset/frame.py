@@ -13,6 +13,7 @@ import copy
 import torch
 from torch.utils.data import Dataset
 import torchvision
+import torchvision.transforms.functional as TF
 from tqdm import tqdm
 import pickle
 import math
@@ -54,7 +55,12 @@ class ActionSpotDataset(Dataset):
             use_actionness = False,         # Use actionness instead of EOS
             use_anchors = False,            # Use temporal anchors for the model
             cheating_dataset = False,       # Cheating dataset that gives model anticipation frames instead of observed frames
-            cheating_range = None           # Range of video to provide when cheating
+            cheating_range = None,          # Range of video to provide when cheating
+            # Phase 2: resolution / pre-extracted features
+            resolution = None,              # Optional resize: [H, W]
+            use_preextracted_features = False,
+            preextracted_feature_dir = "",
+            preextracted_feat_dim = 768,
             # TODO: Add a specific observation percentage when doing test dataset
     ):
         self._src_file = label_file
@@ -100,7 +106,14 @@ class ActionSpotDataset(Dataset):
         self._radi_smoothing = radi_smoothing     
 
         #Frame reader class
-        self._frame_reader = FrameReader(frame_dir, dataset = dataset)
+        self._resolution = resolution
+        self._use_preextracted_features = use_preextracted_features
+        self._preextracted_feature_dir = preextracted_feature_dir
+        self._preextracted_feat_dim = preextracted_feat_dim
+        self._frame_dir = frame_dir
+        if self._use_preextracted_features and not self._preextracted_feature_dir:
+            raise ValueError("use_preextracted_features=True requires a non-empty preextracted_feature_dir")
+        self._frame_reader = FrameReader(frame_dir, dataset=dataset, resolution=resolution)
 
         #Variables for SN & SNB label paths if datastes
         if (self._dataset == 'soccernet') | (self._dataset == 'soccernetball') | (self._dataset == 'soccernetballanticipation') :
@@ -118,6 +131,75 @@ class ActionSpotDataset(Dataset):
             self._load_clips()
 
         self._total_len = len(self._frame_paths)
+
+    def _resolve_preextracted_path(self, base_path):
+        """Resolve a feature file path from the clip base_path.
+
+        Expected layout:
+            preextracted_feature_dir/<relative_path_from_frame_dir>/features.pt (or .npy)
+        Example:
+            frame_dir/.../<video>/clip_1/...
+            preextracted_feature_dir/<video>/clip_1/features.pt
+        """
+        rel = os.path.relpath(base_path, self._frame_dir)
+        feat_dir = os.path.join(self._preextracted_feature_dir, rel)
+        candidates = [
+            os.path.join(feat_dir, "features.pt"),
+            os.path.join(feat_dir, "features.npy"),
+            os.path.join(feat_dir, "feat.pt"),
+            os.path.join(feat_dir, "feat.npy"),
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                return p
+        raise FileNotFoundError(
+            f"Pre-extracted features not found for clip '{rel}'. "
+            f"Tried: {candidates}. Set 'preextracted_feature_dir' correctly."
+        )
+
+    def _load_preextracted_features(self, frames_path):
+        """Load pre-extracted features for one stored clip.
+
+        Returns:
+            Tensor [T, D] float32 (T = frames_path[5])
+        """
+        base_path = frames_path[0]
+        vid_len = int(frames_path[5])
+        feat_path = self._resolve_preextracted_path(base_path)
+
+        if feat_path.endswith(".pt"):
+            try:
+                x = torch.load(feat_path, map_location="cpu", weights_only=False)
+            except TypeError:
+                x = torch.load(feat_path, map_location="cpu")
+        else:
+            x = torch.from_numpy(np.load(feat_path))
+
+        if isinstance(x, dict) and "features" in x:
+            x = x["features"]
+        if not torch.is_tensor(x):
+            x = torch.as_tensor(x)
+
+        # Accept [T, D] or [D, T] or [1, T, D]
+        if x.ndim == 3 and x.shape[0] == 1:
+            x = x.squeeze(0)
+        if x.ndim != 2:
+            raise ValueError(f"Expected 2D features tensor for '{feat_path}', got shape {tuple(x.shape)}")
+
+        # Heuristic: if second dim looks like time, transpose
+        if x.shape[0] == self._preextracted_feat_dim and x.shape[1] == vid_len:
+            x = x.transpose(0, 1)
+
+        x = x.to(dtype=torch.float32)
+
+        # Pad / truncate to vid_len
+        if x.shape[0] < vid_len:
+            pad = torch.zeros((vid_len - x.shape[0], x.shape[1]), dtype=x.dtype)
+            x = torch.cat([x, pad], dim=0)
+        elif x.shape[0] > vid_len:
+            x = x[:vid_len]
+
+        return x
 
     def _store_clips_anticipation(self):
         #Initialize frame paths list
@@ -332,8 +414,12 @@ class ActionSpotDataset(Dataset):
             # Get observed frames
             cheating_start = int(self._cheating_range[0]*vid_len)
             cheating_end = int(self._cheating_range[1]*vid_len)
-            frames = self._frame_reader.load_frames(frames_path, cheating_start, cheating_end, pad=True, stride=self._stride)
-            observed_frames = frames[cheating_start:cheating_end]
+            if self._use_preextracted_features:
+                feats = self._load_preextracted_features(frames_path)
+                observed_frames = feats[cheating_start:cheating_end]
+            else:
+                frames = self._frame_reader.load_frames(frames_path, cheating_start, cheating_end, pad=True, stride=self._stride)
+                observed_frames = frames[cheating_start:cheating_end]
             # Create array with ground truth label for each frame
             past_labels = np.zeros(len(observed_frames))
             observed_labels_idx = (cheating_start <= all_labels_offsets) & (all_labels_offsets < cheating_end)
@@ -349,8 +435,12 @@ class ActionSpotDataset(Dataset):
                     past_labels[o] = a
         else:
             # Get observed frames
-            frames = self._frame_reader.load_frames(frames_path, 0, observed_len, pad=True, stride=self._stride)
-            observed_frames = frames[:observed_len]
+            if self._use_preextracted_features:
+                feats = self._load_preextracted_features(frames_path)
+                observed_frames = feats[:observed_len]
+            else:
+                frames = self._frame_reader.load_frames(frames_path, 0, observed_len, pad=True, stride=self._stride)
+                observed_frames = frames[:observed_len]
             # Create array with ground truth label for each frame
             past_labels = np.zeros(len(observed_frames))
             observed_labels_idx = all_labels_offsets < observed_len
@@ -455,12 +545,19 @@ class ActionSpotDataset(Dataset):
 # Directly from: https://github.com/arturxe2/T-DEED_v2/blob/main/dataset/frame.py
 class FrameReader:
 
-    def __init__(self, frame_dir, dataset):
+    def __init__(self, frame_dir, dataset, resolution=None):
         self._frame_dir = frame_dir
         self.dataset = dataset
+        self._resolution = resolution
 
     def read_frame(self, frame_path):
         img = torchvision.io.read_image(frame_path)
+        if self._resolution is not None:
+            # TF.resize expects [C, H, W] for tensors
+            try:
+                img = TF.resize(img, size=self._resolution, antialias=True)
+            except TypeError:
+                img = TF.resize(img, size=self._resolution)
         return img
     
     def load_paths(self, video_name, start, end, stride=1, source_info = None):
@@ -482,7 +579,7 @@ class FrameReader:
             video_name = video_name.split('_')[0]  
             path = os.path.join(self._frame_dir, video_name)
 
-        if self.dataset == 'soccernetball' or self.dataset == 'soccernetballanticipation':
+        if self.dataset in ('soccernetball', 'soccernetballanticipation'):
             path = os.path.join(self._frame_dir, video_name)
 
         found_start = -1
@@ -527,7 +624,7 @@ class FrameReader:
                 base_path = path
                 ndigits = -1
 
-            elif self.dataset == 'soccernetball' or 'soccernetballanticipation':
+            elif self.dataset in ('soccernetball', 'soccernetballanticipation'):
                 frame = frame_num
                 frame_path = os.path.join(path, 'frame' + str(frame) + '.jpg')
                 base_path = path
@@ -593,6 +690,7 @@ class ActionAnticipationVideoDataset(Dataset):
             obs_len,                        # Number of frames to observe
             stride=1,                       # Downsample frame rate
             dataset = 'soccernetballanticipation',
+            resolution=None,
     ):
         if not dataset == 'soccernetballanticipation':
             print("For evaluating on datasets other than the Ball Action Anticipation dataset use the ActionSpotVideoDataset class")
@@ -606,7 +704,7 @@ class ActionAnticipationVideoDataset(Dataset):
         self._stride = stride
         self._dataset = dataset
 
-        self._frame_reader = FrameReaderVideo(frame_dir, dataset = dataset)
+        self._frame_reader = FrameReaderVideo(frame_dir, dataset=dataset, resolution=resolution)
 
         #Variables for SNBA label paths if datastes
         global LABELS_SNBA_PATH
@@ -671,6 +769,7 @@ class ActionSpotVideoDataset(Dataset):
             stride=1,                       # Downsample frame rate
             pad_len=DEFAULT_PAD_LEN,        # Number of frames to pad the start and end of videos
             dataset = 'finediving',
+            resolution=None,
     ):
         self._src_file = label_file
         self._labels = load_json(label_file)
@@ -683,7 +782,7 @@ class ActionSpotVideoDataset(Dataset):
         self._dataset = dataset
         pad_len = 0 if self._dataset == 'soccernetballanticipation' else pad_len
 
-        self._frame_reader = FrameReaderVideo(frame_dir, dataset = dataset)
+        self._frame_reader = FrameReaderVideo(frame_dir, dataset=dataset, resolution=resolution)
 
         # Create list containing the video that each clip comes from
         self._clips = []
@@ -825,12 +924,18 @@ class ActionSpotVideoDataset(Dataset):
 
 class FrameReaderVideo:
 
-    def __init__(self, frame_dir, dataset):
+    def __init__(self, frame_dir, dataset, resolution=None):
         self._frame_dir = frame_dir
         self._dataset = dataset
+        self._resolution = resolution
 
     def read_frame(self, frame_path):
         img = torchvision.io.read_image(frame_path) #/ 255 -> modified for ActionSpotVideoDataset (to be compatible with train reading without / 255)
+        if self._resolution is not None:
+            try:
+                img = TF.resize(img, size=self._resolution, antialias=True)
+            except TypeError:
+                img = TF.resize(img, size=self._resolution)
         return img
 
     def load_frames(self, video_name, start_frame, end_frame, start_index, end_index, pad=False, stride=1, source_info = None):
@@ -876,7 +981,7 @@ class FrameReaderVideo:
                     self._frame_dir, video_name, 'frame' + str(frame_num) + '.jpg'
                 )
 
-            elif self._dataset == 'soccernetball' or 'soccernetballanticipation':
+            elif self._dataset in ('soccernetball', 'soccernetballanticipation'):
                 frame_path = os.path.join(self._frame_dir, video_name, 'frame' + str(frame_num) + '.jpg')
             
             elif self._dataset == 'tennis':

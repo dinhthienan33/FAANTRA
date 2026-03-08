@@ -41,6 +41,11 @@ def get_datasets(args, label_pad_idx, n_class):
         'anticipate_background': args.anticipate_background, 'use_actionness': args.actionness,
         'use_anchors': args.use_anchors, 'cheating_dataset': args.cheating_dataset,
         'cheating_range': args.cheating_range,
+        # Phase 2: resolution / pre-extracted features wiring
+        'resolution': getattr(args, 'resolution', None),
+        'use_preextracted_features': getattr(args, 'use_preextracted_features', False),
+        'preextracted_feature_dir': getattr(args, 'preextracted_feature_dir', ''),
+        'preextracted_feat_dim': getattr(args, 'preextracted_feat_dim', 768),
     }
 
     # Create training dataset
@@ -100,6 +105,11 @@ def get_datasets(args, label_pad_idx, n_class):
             'anticipate_background': args.anticipate_background, 'use_actionness': args.actionness,
             'use_anchors': args.use_anchors, 'cheating_dataset': args.cheating_dataset,
             'cheating_range': args.cheating_range,
+            # Phase 2: resolution / pre-extracted features wiring
+            'resolution': getattr(args, 'resolution', None),
+            'use_preextracted_features': getattr(args, 'use_preextracted_features', False),
+            'preextracted_feature_dir': getattr(args, 'preextracted_feature_dir', ''),
+            'preextracted_feat_dim': getattr(args, 'preextracted_feat_dim', 768),
         }
 
         jointtrain_classes = load_classes(os.path.join('data', args.jointtrain['dataset'], 'class.txt'))
