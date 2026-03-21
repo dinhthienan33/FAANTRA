@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import subprocess
 import sys
 import pickle
 
@@ -224,6 +225,67 @@ def extract_features_for_split(split, store_dir, feature_dir, model, clip_len, s
     print(f"Saved {split} features -> {feat_store_path}")
 
 
+def _split_has_frames(download_path, frame_size, split):
+    """Check if a split already has exported frame*.jpg files."""
+    size_dir = "224p" if frame_size == "224p" else "720p"
+    split_dir = os.path.join(download_path, size_dir, split)
+    if not os.path.isdir(split_dir):
+        return False
+    for game_dir in os.scandir(split_dir):
+        if not game_dir.is_dir():
+            continue
+        for clip_dir in os.scandir(game_dir.path):
+            if not clip_dir.is_dir():
+                continue
+            for entry in os.scandir(clip_dir.path):
+                if entry.name.startswith("frame") and entry.name.endswith(".jpg"):
+                    return True
+    return False
+
+
+def download_data(download_path, download_key, frame_size, splits, export_only,
+                   delete_videos, cpus):
+    print(f"=== Step 0: Download & export data via setup_dataset_BAA.py ===")
+
+    needed_splits = []
+    for split in splits:
+        if _split_has_frames(download_path, frame_size, split):
+            print(f"Frames already exist for {split}, skipping.")
+        else:
+            needed_splits.append(split)
+
+    if not needed_splits:
+        print("All splits already have frames. Nothing to download/export.\n")
+        return
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    setup_script = os.path.join(script_dir, "setup_dataset_BAA.py")
+    if not os.path.exists(setup_script):
+        raise FileNotFoundError(f"setup_dataset_BAA.py not found at {setup_script}")
+
+    for split in needed_splits:
+        cmd = [
+            sys.executable, setup_script,
+            "--download-path", download_path,
+            "--frame-size", frame_size,
+            "--cpus", str(cpus),
+            "--one-split", split,
+        ]
+        if export_only:
+            cmd.append("--export-only")
+        else:
+            if download_key is None:
+                raise ValueError("--download-key is required when not using --skip-download")
+            cmd.extend(["--download-key", download_key])
+        if delete_videos:
+            cmd.append("--delete-videos")
+
+        print(f"Running: {' '.join(cmd)}")
+        subprocess.run(cmd, check=True)
+
+    print("Data download/export complete.\n")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--feature-output", type=str, default="feature_output")
@@ -234,12 +296,37 @@ def main():
     parser.add_argument("--splits", nargs="+", default=SPLITS)
     parser.add_argument("--clip-len", type=int, default=64)
     parser.add_argument("--stride", type=int, default=STRIDE_SNBA)
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--skip-download", action="store_true",
+                        help="Skip data download/export and go straight to clip building & feature extraction")
+    parser.add_argument("--download-path", type=str, default="./data/soccernetball",
+                        help="Directory for dataset download (passed to setup_dataset_BAA.py)")
+    parser.add_argument("--download-key", type=str, default=None,
+                        help="NDA download key for unzipping (passed to setup_dataset_BAA.py)")
+    parser.add_argument("--export-only", action="store_true",
+                        help="Only export frames from already-downloaded zips (passed to setup_dataset_BAA.py)")
+    parser.add_argument("--frame-size", type=str, default="224p", choices=["224p", "448p", "720p"],
+                        help="Frame export resolution (passed to setup_dataset_BAA.py)")
+    parser.add_argument("--delete-videos", action="store_true",
+                        help="Delete zip/video files after export to save space")
+    parser.add_argument("--cpus", type=int, default=12,
+                        help="Number of CPUs for frame export")
     args = parser.parse_args()
 
     store_dir = args.store_dir or args.frame_dir
     os.makedirs(args.feature_output, exist_ok=True)
+
+    if not args.skip_download:
+        download_data(
+            download_path=args.download_path,
+            download_key=args.download_key,
+            frame_size=args.frame_size,
+            splits=args.splits,
+            export_only=args.export_only,
+            delete_videos=args.delete_videos,
+            cpus=args.cpus,
+        )
 
     if args.device == 'cuda' and torch.cuda.is_available():
         torch.backends.cudnn.benchmark = True
