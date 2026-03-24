@@ -1,11 +1,26 @@
+# Core / training
 numpy
 scipy
 torch
-einops
+torchvision
 timm
+tqdm
+einops
 transformers
+
+# Datasets & tooling
 SoccerNet
+opencv-python
+pyzipper
+huggingface_hub
+
+# Logging / eval
 wandb
 tabulate
-pyzipper
-opencv-python
+
+# auto_extract.py --upload-drive + upload_drive.py
+python-dotenv
+google-api-python-client
+google-auth
+google-auth-httplib2
+requests
