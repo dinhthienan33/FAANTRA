@@ -312,6 +312,17 @@ def main():
                         help="Delete zip/video files after export to save space")
     parser.add_argument("--cpus", type=int, default=12,
                         help="Number of CPUs for frame export")
+    parser.add_argument(
+        "--upload-drive",
+        action="store_true",
+        help="After each arch finishes, upload that arch folder under --feature-output via upload_drive.py",
+    )
+    parser.add_argument(
+        "--drive-folder-id",
+        type=str,
+        default="1AXx6CwC8OdGAv8PnIgPrWkJ_JK1i4xYv",
+        help="Drive parent folder id (same default as upload_drive.py)",
+    )
     args = parser.parse_args()
 
     store_dir = args.store_dir or args.frame_dir
@@ -337,6 +348,13 @@ def main():
         build_clips_for_split(split, args.frame_dir, store_dir, args.clip_len, args.stride, args.dataset_path)
 
     print("\n=== Step 2: Extract features for each arch ===")
+    upload_script = None
+    if args.upload_drive:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        upload_script = os.path.join(script_dir, "upload_drive.py")
+        if not os.path.isfile(upload_script):
+            raise FileNotFoundError(f"upload_drive.py not found at {upload_script}")
+
     for arch in args.archs:
         feature_dir = os.path.join(args.feature_output, arch)
         os.makedirs(feature_dir, exist_ok=True)
@@ -353,6 +371,19 @@ def main():
 
         del model
         torch.cuda.empty_cache()
+
+        if args.upload_drive:
+            out_abs = os.path.abspath(feature_dir)
+            cmd = [
+                sys.executable,
+                upload_script,
+                "--path",
+                out_abs,
+                "--folder-id",
+                args.drive_folder_id,
+            ]
+            print(f"\n=== Upload arch to Drive: {' '.join(cmd)} ===")
+            subprocess.run(cmd, check=True)
 
     print(f"\nDone. Features saved at: {args.feature_output}/")
     for arch in args.archs:
