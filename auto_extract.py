@@ -6,6 +6,7 @@ import subprocess
 import sys
 import pickle
 
+import dotenv
 import numpy as np
 import torch
 import torch.nn as nn
@@ -275,7 +276,10 @@ def download_data(download_path, download_key, frame_size, splits, export_only,
             cmd.append("--export-only")
         else:
             if download_key is None:
-                raise ValueError("--download-key is required when not using --skip-download")
+                raise ValueError(
+                    "NDA key required: set NDA_KEY in .env or pass --download-key "
+                    "(when not using --export-only or --skip-download)"
+                )
             cmd.extend(["--download-key", download_key])
         if delete_videos:
             cmd.append("--delete-videos")
@@ -287,6 +291,7 @@ def download_data(download_path, download_key, frame_size, splits, export_only,
 
 
 def main():
+    dotenv.load_dotenv()
     parser = argparse.ArgumentParser()
     parser.add_argument("--feature-output", type=str, default="feature_output")
     parser.add_argument("--frame-dir", type=str, default="data/soccernetball/224p")
@@ -302,8 +307,12 @@ def main():
                         help="Skip data download/export and go straight to clip building & feature extraction")
     parser.add_argument("--download-path", type=str, default="./data/soccernetball",
                         help="Directory for dataset download (passed to setup_dataset_BAA.py)")
-    parser.add_argument("--download-key", type=str, default=None,
-                        help="NDA download key for unzipping (passed to setup_dataset_BAA.py)")
+    parser.add_argument(
+        "--download-key",
+        type=str,
+        default=os.environ.get("NDA_KEY") or None,
+        help="NDA download key for unzipping (default: NDA_KEY from .env; passed to setup_dataset_BAA.py)",
+    )
     parser.add_argument("--export-only", action="store_true",
                         help="Only export frames from already-downloaded zips (passed to setup_dataset_BAA.py)")
     parser.add_argument("--frame-size", type=str, default="224p", choices=["224p", "448p", "720p"],
