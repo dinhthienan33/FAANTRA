@@ -34,7 +34,7 @@ from tqdm import tqdm
 INTERNVIDEO2_REPO = "OpenGVLab/InternVideo"
 INTERNVIDEO2_HF_REPO_STAGE2 = "OpenGVLab/InternVideo2-Stage2_1B-224p-f4"
 INTERNVIDEO2_HF_REPO_CLIP = "OpenGVLab/InternVideo2-CLIP-1B-224p-f8"
-INTERNVIDEO2_NUM_FRAMES = 8
+INTERNVIDEO2_NUM_FRAMES = 4  # Stage2-1B is trained with f4; keep in sync
 INTERNVIDEO2_IMG_SIZE = 224
 INTERNVIDEO2_FEAT_DIM = 768
 
@@ -214,40 +214,61 @@ def _download_weights():
             repo_id=INTERNVIDEO2_HF_REPO_STAGE2,
             filename="InternVideo2-stage2_1b-224p-f4.pt",
             token=token,
+            local_files_only=True,
         )
-    except Exception as e:
-        raise RuntimeError(
-            f"Cannot download {INTERNVIDEO2_HF_REPO_STAGE2}. "
-            f"Visit https://huggingface.co/{INTERNVIDEO2_HF_REPO_STAGE2} to accept terms, "
-            f"then set HF_TOKEN env var. Error: {e}"
-        ) from e
+    except Exception:
+        # Fallback to network download (requires HF_TOKEN + accepted terms)
+        try:
+            stage2_path = hf_hub_download(
+                repo_id=INTERNVIDEO2_HF_REPO_STAGE2,
+                filename="InternVideo2-stage2_1b-224p-f4.pt",
+                token=token,
+                local_files_only=False,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Cannot download {INTERNVIDEO2_HF_REPO_STAGE2}. "
+                f"Visit https://huggingface.co/{INTERNVIDEO2_HF_REPO_STAGE2} to accept terms, "
+                f"then set HF_TOKEN env var. Error: {e}"
+            ) from e
 
     try:
         clip_path = hf_hub_download(
             repo_id=INTERNVIDEO2_HF_REPO_CLIP,
             filename="1B_clip.pth",
             token=token,
+            local_files_only=True,
         )
-    except Exception as e:
-        raise RuntimeError(
-            f"Cannot download {INTERNVIDEO2_HF_REPO_CLIP}. "
-            f"Visit https://huggingface.co/{INTERNVIDEO2_HF_REPO_CLIP} to accept terms, "
-            f"then set HF_TOKEN env var. Error: {e}"
-        ) from e
+    except Exception:
+        try:
+            clip_path = hf_hub_download(
+                repo_id=INTERNVIDEO2_HF_REPO_CLIP,
+                filename="1B_clip.pth",
+                token=token,
+                local_files_only=False,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Cannot download {INTERNVIDEO2_HF_REPO_CLIP}. "
+                f"Visit https://huggingface.co/{INTERNVIDEO2_HF_REPO_CLIP} to accept terms, "
+                f"then set HF_TOKEN env var. Error: {e}"
+            ) from e
 
     return stage2_path, clip_path
 
 
 
 class _InternVideo2VisionOnly(torch.nn.Module):
-    """Minimal wrapper: vision encoder + projection for feature extraction only.
-    No text encoder / BERT needed."""
+    """
+    Vision-only wrapper for feature extraction.
 
-    def __init__(self, vision_encoder, vision_proj, embed_dim, num_frames):
+    We rely on InternVideo2's internal `clip_projector` to produce 768-dim
+    pooled features (consistent with InternVideo2-CLIP-1B-224p-f8).
+    """
+
+    def __init__(self, vision_encoder, num_frames):
         super().__init__()
         self.vision_encoder = vision_encoder
-        self.vision_proj = vision_proj
-        self.embed_dim = embed_dim
         self.num_frames = num_frames
 
     @property
@@ -256,12 +277,12 @@ class _InternVideo2VisionOnly(torch.nn.Module):
 
     @torch.no_grad()
     def get_vid_feat(self, frames):
-        """frames: [B, T, C, H, W] -> pooled features [B, embed_dim]."""
-        T = frames.shape[1]
-        use_image = T == 1
+        """frames: [B, T, C, H, W] -> pooled features [B, 768]."""
         x = frames.permute(0, 2, 1, 3, 4).to(self.dtype)  # [B,C,T,H,W]
+        use_image = x.shape[2] == 1
         _vision_embeds, pooled = self.vision_encoder(x, None, use_image)[:2]
-        vfeat = self.vision_proj(pooled)
+        # pooled: [B, 1, 768] -> [B, 768]
+        vfeat = pooled.squeeze(1)
         vfeat = vfeat / vfeat.norm(dim=-1, keepdim=True)
         return vfeat
 
@@ -304,7 +325,10 @@ def load_internvideo2(device="cuda"):
             "clip_norm_type": "l2",
             "clip_return_layer": 6,
             "clip_student_return_interval": 1,
-            "pretrained": "",
+            # Important: we will load weights manually below with correct
+            # key-prefix handling. Setting to None prevents the demo code
+            # from calling torch.load('').
+            "pretrained": None,
             "use_checkpoint": True,
             "checkpoint_num": 40,
             "use_flash_attn": use_half,
@@ -321,49 +345,47 @@ def load_internvideo2(device="cuda"):
             "keep_temporal": False,
             "only_mask": True,
         },
-        "embed_dim": 512,
+        "embed_dim": 512,  # unused for vision-only wrapper
     })
 
     print("Building InternVideo2-1B vision encoder...")
     vision_encoder = pretrain_internvideo2_1b_patch14_224(model_cfg)
-    vision_proj = torch.nn.Linear(INTERNVIDEO2_FEAT_DIM, model_cfg.embed_dim)
 
-    # Load Stage2 weights
+    # Load Stage2 weights (strip `vision_encoder.` prefix to match the
+    # PretrainInternVideo2 module parameters).
     print(f"Loading Stage2 base weights from {stage2_path}")
     ckpt = torch.load(stage2_path, map_location="cpu", weights_only=False)
     state_dict = ckpt.get("model", ckpt.get("module", ckpt))
 
-    interpolate_pos_embed_internvideo2_new(
-        state_dict, vision_encoder, orig_t_size=4
-    )
-
     ve_prefix = "vision_encoder."
     ve_sd = {k[len(ve_prefix):]: v for k, v in state_dict.items() if k.startswith(ve_prefix)}
-    vp_sd = {k.replace("vision_proj.", ""): v for k, v in state_dict.items() if k.startswith("vision_proj.")}
+
+    # If needed (when switching temporal length), we interpolate positional
+    # embeddings. For f4->f4 it's typically a no-op.
+    try:
+        state_tmp = {**state_dict}
+        interpolate_pos_embed_internvideo2_new(state_tmp, vision_encoder, orig_t_size=4)
+    except Exception:
+        pass
 
     msg = vision_encoder.load_state_dict(ve_sd, strict=False)
-    print(f"  vision_encoder: {len(ve_sd)} keys loaded, missing={len(msg.missing_keys)}, unexpected={len(msg.unexpected_keys)}")
-    if vp_sd:
-        vision_proj.load_state_dict(vp_sd, strict=False)
-        print(f"  vision_proj: {len(vp_sd)} keys loaded")
+    print(
+        "  vision_encoder: "
+        f"{len(ve_sd)} keys loaded, missing={len(msg.missing_keys)}, unexpected={len(msg.unexpected_keys)}"
+    )
 
-    # Load CLIP add-on weights on top
+    # Load CLIP add-on weights on top (also under `vision_encoder.` prefix).
     print(f"Loading CLIP add-on weights from {clip_path}")
     clip_ckpt = torch.load(clip_path, map_location="cpu", weights_only=False)
     clip_sd = clip_ckpt.get("model", clip_ckpt.get("module", clip_ckpt))
-
     ve_clip = {k[len(ve_prefix):]: v for k, v in clip_sd.items() if k.startswith(ve_prefix)}
-    vp_clip = {k.replace("vision_proj.", ""): v for k, v in clip_sd.items() if k.startswith("vision_proj.")}
-    if ve_clip:
-        msg = vision_encoder.load_state_dict(ve_clip, strict=False)
-        print(f"  CLIP vision_encoder: {len(ve_clip)} keys, missing={len(msg.missing_keys)}")
-    if vp_clip:
-        vision_proj.load_state_dict(vp_clip, strict=False)
-        print(f"  CLIP vision_proj: {len(vp_clip)} keys")
-
-    model = _InternVideo2VisionOnly(
-        vision_encoder, vision_proj, model_cfg.embed_dim, INTERNVIDEO2_NUM_FRAMES
+    msg = vision_encoder.load_state_dict(ve_clip, strict=False)
+    print(
+        "  CLIP vision_encoder: "
+        f"{len(ve_clip)} keys loaded, missing={len(msg.missing_keys)}, unexpected={len(msg.unexpected_keys)}"
     )
+
+    model = _InternVideo2VisionOnly(vision_encoder, INTERNVIDEO2_NUM_FRAMES)
     model = model.to(device).eval().to(torch.float32)
     print(f"InternVideo2-1B vision-only loaded on {device}")
     return model
@@ -413,9 +435,25 @@ def _subsample_frames(frames_t, num_frames):
         if T < num_frames:
             pad = torch.zeros(num_frames - T, *frames_t.shape[1:], dtype=frames_t.dtype)
             frames_t = torch.cat([frames_t, pad], dim=0)
-        return frames_t, T
-    indices = torch.linspace(0, T - 1, num_frames).long()
-    return frames_t[indices], T
+        sampled = frames_t
+    else:
+        indices = torch.linspace(0, T - 1, num_frames).long()
+        sampled = frames_t[indices]
+
+    # InternVideo2 expects square 224x224 inputs; our dataset uses 224p
+    # (height=224, width can differ). Resize here to avoid token/pos-embed mismatch.
+    H, W = sampled.shape[-2], sampled.shape[-1]
+    if (H, W) != (INTERNVIDEO2_IMG_SIZE, INTERNVIDEO2_IMG_SIZE):
+        sampled_f = sampled.float()
+        sampled_f = torch.nn.functional.interpolate(
+            sampled_f,
+            size=(INTERNVIDEO2_IMG_SIZE, INTERNVIDEO2_IMG_SIZE),
+            mode="bilinear",
+            align_corners=False,
+        )
+        sampled = sampled_f
+
+    return sampled, T
 
 
 def _load_batch(indices, frame_paths, stride, num_frames, num_workers=4):
@@ -499,15 +537,34 @@ def extract_features_for_split(
         print(f"{split}: all {len(frame_paths)} clips already extracted")
         return
 
-    use_amp = device.startswith("cuda") and torch.cuda.is_available()
+    # InternVideo2 vision encoder + checkpointing ở bản codebase này khá nhạy
+    # với autocast: bật AMP có thể làm tăng/giữ thêm activation và gây OOM
+    # dù batch_size nhỏ. Vì vậy mặc định tắt AMP để ổn định.
+    use_amp = False
     mean_t = V_MEAN.clone()
     std_t = V_STD.clone()
     io_workers = min(8, os.cpu_count() or 4)
     num_frames = INTERNVIDEO2_NUM_FRAMES
 
+    # InternVideo2 vision encoder khá nặng; batch quá lớn sẽ OOM ngay ở attention.
+    # Tự động cap theo dung lượng GPU để tránh crash khi gọi từ auto_extract.
+    effective_batch_size = batch_size
+    if device.startswith("cuda") and torch.cuda.is_available():
+        props = torch.cuda.get_device_properties(0)
+        total_gb = props.total_memory / (1024**3)
+        # For ~16GB cards, InternVideo2 attention is still too heavy for batch>1.
+        if total_gb <= 18:
+            effective_batch_size = min(effective_batch_size, 1)
+
+    if effective_batch_size != batch_size:
+        print(
+            f"[InternVideo2] Cap batch_size: {batch_size} -> {effective_batch_size} "
+            f"(GPU total ~{(torch.cuda.get_device_properties(0).total_memory/(1024**3)):.1f}GB)"
+        )
+
     print(
         f"Extracting {split}: {len(todo_indices)}/{len(frame_paths)} clips "
-        f"(batch={batch_size}, num_frames={num_frames}, amp={use_amp}, feat_dim={INTERNVIDEO2_FEAT_DIM})"
+        f"(batch={effective_batch_size}, num_frames={num_frames}, amp={use_amp}, feat_dim={INTERNVIDEO2_FEAT_DIM})"
     )
 
     save_pool = ThreadPoolExecutor(max_workers=2)
@@ -515,8 +572,8 @@ def extract_features_for_split(
     pending_saves = []
 
     batches = [
-        todo_indices[i : i + batch_size]
-        for i in range(0, len(todo_indices), batch_size)
+        todo_indices[i : i + effective_batch_size]
+        for i in range(0, len(todo_indices), effective_batch_size)
     ]
 
     prefetch_future = (
