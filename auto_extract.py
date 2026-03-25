@@ -21,8 +21,8 @@ from model.T_Deed_Modules.shift import make_temporal_shift
 FPS_SN = 25
 OVERLAP_SNBA = 0.9
 STRIDE_SNBA = 4
-ARCHS = ['rny002_gsf', 'rny004_gsf', 'rny006_gsf', 'rny008_gsf']
-SPLITS = ['train', 'valid', 'test']
+ARCHS = ['rny004_gsf', 'rny006_gsf', 'rny008_gsf']
+SPLITS = ['train', 'test']
 
 
 def load_classes(file_name):
@@ -153,19 +153,76 @@ def load_frames_for_clip(frame_path_info, stride):
     return result
 
 
+def _n_segment_for_clip_len(clip_len):
+    """Must match create_feature_extractor (max_obs_len for GSM/GSF)."""
+    return int(clip_len * 0.5)
+
+
+def _load_and_pad_clips(indices, frame_paths, stride, n_segment, fixed_t, num_workers=4):
+    """Load clips from disk with parallel JPEG decoding, pad to fixed_t (constant shape for cudnn.benchmark)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _load_one(idx):
+        frames = load_frames_for_clip(frame_paths[idx], stride)
+        return idx, frames
+
+    raw = []
+    with ThreadPoolExecutor(max_workers=num_workers) as pool:
+        for idx, frames in pool.map(_load_one, indices):
+            if frames is not None:
+                raw.append((idx, frames))
+
+    if not raw:
+        return None, [], [], 0
+
+    valid_indices = [r[0] for r in raw]
+    batch_frames = [r[1] for r in raw]
+    orig_lens = [f.shape[0] for f in batch_frames]
+
+    chunks = []
+    for f in batch_frames:
+        if f.shape[0] < fixed_t:
+            pad = torch.zeros(fixed_t - f.shape[0], *f.shape[1:], dtype=f.dtype)
+            f = torch.cat([f, pad], dim=0)
+        elif f.shape[0] > fixed_t:
+            f = f[:fixed_t]
+        chunks.append(f)
+
+    mega = torch.cat(chunks, dim=0)
+    return mega, valid_indices, orig_lens, fixed_t
+
+
 @torch.no_grad()
-def extract_batch(model, frames_batch, device,
-                  mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)):
-    frames_batch = frames_batch.float().div_(255.0)
-    m = torch.tensor(mean, device=device).view(1, 3, 1, 1)
-    s = torch.tensor(std, device=device).view(1, 3, 1, 1)
-    frames_batch = frames_batch.to(device)
-    frames_batch = (frames_batch - m) / s
-    features = model(frames_batch)
-    return features.cpu().numpy()
+def _gpu_forward(model, mega_uint8, device, mean_t, std_t, use_amp):
+    """Transfer uint8 tensor to GPU, normalize in-place, run model with optional AMP."""
+    mega_pin = mega_uint8.pin_memory() if device.startswith("cuda") else mega_uint8
+    gpu = mega_pin.to(device, dtype=torch.float32, non_blocking=True)
+    gpu.div_(255.0).sub_(mean_t).div_(std_t)
+    if use_amp:
+        with torch.amp.autocast("cuda"):
+            feats = model(gpu)
+    else:
+        feats = model(gpu)
+    return feats
+
+
+def _save_features_async(save_pool, feat_store_path, valid_indices, feats_np, orig_lens, t_padded):
+    """Submit np.save calls to a thread pool so disk I/O doesn't block the next GPU batch."""
+    d = feats_np.shape[-1]
+    futures = []
+    for i, idx in enumerate(valid_indices):
+        sl = slice(i * t_padded, i * t_padded + orig_lens[i])
+        feat = feats_np[sl]
+        if feat.ndim == 1:
+            feat = feat.reshape(1, d)
+        path = os.path.join(feat_store_path, f'{idx:06d}.npy')
+        futures.append(save_pool.submit(np.save, path, feat))
+    return futures
 
 
 def extract_features_for_split(split, store_dir, feature_dir, model, clip_len, stride, device, batch_size):
+    from concurrent.futures import ThreadPoolExecutor
+
     store_path = os.path.join(store_dir, f'LEN{clip_len}DIS0SPLIT{split}')
     frame_paths_file = os.path.join(store_path, 'frame_paths.pkl')
 
@@ -189,39 +246,57 @@ def extract_features_for_split(split, store_dir, feature_dir, model, clip_len, s
         print(f"{split}: all {len(frame_paths)} clips already extracted")
         return
 
-    print(f"Extracting {split}: {len(todo_indices)}/{len(frame_paths)} clips (batch_size={batch_size})")
+    n_segment = _n_segment_for_clip_len(clip_len)
+    rem = clip_len % n_segment
+    fixed_t = clip_len + (n_segment - rem) if rem else clip_len
+    use_amp = device.startswith("cuda") and torch.cuda.is_available()
+    mean_t = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
+    std_t = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
 
-    for batch_start in tqdm(range(0, len(todo_indices), batch_size), desc=f"{split}"):
-        batch_indices = todo_indices[batch_start:batch_start + batch_size]
-        batch_frames = []
-        valid_indices = []
+    io_workers = min(8, os.cpu_count() or 4)
+    print(
+        f"Extracting {split}: {len(todo_indices)}/{len(frame_paths)} clips "
+        f"(batch={batch_size}, fixed_t={fixed_t}, n_seg={n_segment}, amp={use_amp}, io_workers={io_workers})"
+    )
 
-        for idx in batch_indices:
-            frames = load_frames_for_clip(frame_paths[idx], stride)
-            if frames is not None:
-                batch_frames.append(frames)
-                valid_indices.append(idx)
+    save_pool = ThreadPoolExecutor(max_workers=2)
+    pending_saves = []
+    prefetch_pool = ThreadPoolExecutor(max_workers=1)
 
-        if not batch_frames:
+    batches = [
+        todo_indices[i:i + batch_size]
+        for i in range(0, len(todo_indices), batch_size)
+    ]
+
+    prefetch_future = prefetch_pool.submit(
+        _load_and_pad_clips, batches[0], frame_paths, stride, n_segment, fixed_t, io_workers
+    ) if batches else None
+
+    for b_idx in tqdm(range(len(batches)), desc=f"{split}"):
+        mega, valid_indices, orig_lens, t_padded = prefetch_future.result()
+
+        if b_idx + 1 < len(batches):
+            prefetch_future = prefetch_pool.submit(
+                _load_and_pad_clips, batches[b_idx + 1], frame_paths, stride, n_segment, fixed_t, io_workers
+            )
+
+        if mega is None:
             continue
 
-        max_len = max(f.shape[0] for f in batch_frames)
-        padded = []
-        for f in batch_frames:
-            if f.shape[0] < max_len:
-                pad = torch.zeros(max_len - f.shape[0], *f.shape[1:], dtype=f.dtype)
-                f = torch.cat([f, pad], dim=0)
-            padded.append(f)
+        feats_gpu = _gpu_forward(model, mega, device, mean_t, std_t, use_amp)
+        feats_np = feats_gpu.cpu().numpy()
+        del feats_gpu
 
-        all_features = []
-        for f in padded:
-            feats = extract_batch(model, f, device)
-            all_features.append(feats)
+        for f in pending_saves:
+            f.result()
+        pending_saves = _save_features_async(
+            save_pool, feat_store_path, valid_indices, feats_np, orig_lens, t_padded
+        )
 
-        for i, idx in enumerate(valid_indices):
-            orig_len = batch_frames[i].shape[0]
-            feat = all_features[i][:orig_len]
-            np.save(os.path.join(feat_store_path, f'{idx:06d}.npy'), feat)
+    for f in pending_saves:
+        f.result()
+    save_pool.shutdown(wait=True)
+    prefetch_pool.shutdown(wait=False)
 
     print(f"Saved {split} features -> {feat_store_path}")
 
@@ -301,7 +376,13 @@ def main():
     parser.add_argument("--splits", nargs="+", default=SPLITS)
     parser.add_argument("--clip-len", type=int, default=64)
     parser.add_argument("--stride", type=int, default=STRIDE_SNBA)
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=32,
+        help="Số clip gộp trong một lần forward GPU (tăng dần đến khi gần đầy VRAM; giá trị cũ 256 "
+        "chỉ đọc JPEG theo nhóm, không dùng hết GPU).",
+    )
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--skip-download", action="store_true",
                         help="Skip data download/export and go straight to clip building & feature extraction")
@@ -378,21 +459,21 @@ def main():
                 args.clip_len, args.stride, args.device, args.batch_size
             )
 
+            if args.upload_drive:
+                split_dir = os.path.join(
+                    feature_dir, f'LEN{args.clip_len}DIS0SPLIT{split}'
+                )
+                if os.path.isdir(split_dir):
+                    cmd = [
+                        sys.executable, upload_script,
+                        "--path", os.path.abspath(split_dir),
+                        "--folder-id", args.drive_folder_id,
+                    ]
+                    print(f"\n=== Upload {arch}/{split} to Drive: {' '.join(cmd)} ===")
+                    subprocess.run(cmd, check=True)
+
         del model
         torch.cuda.empty_cache()
-
-        if args.upload_drive:
-            out_abs = os.path.abspath(feature_dir)
-            cmd = [
-                sys.executable,
-                upload_script,
-                "--path",
-                out_abs,
-                "--folder-id",
-                args.drive_folder_id,
-            ]
-            print(f"\n=== Upload arch to Drive: {' '.join(cmd)} ===")
-            subprocess.run(cmd, check=True)
 
     print(f"\nDone. Features saved at: {args.feature_output}/")
     for arch in args.archs:
