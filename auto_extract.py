@@ -21,7 +21,8 @@ from model.T_Deed_Modules.shift import make_temporal_shift
 FPS_SN = 25
 OVERLAP_SNBA = 0.9
 STRIDE_SNBA = 4
-ARCHS = ['rny004_gsf', 'rny006_gsf', 'rny008_gsf']
+ARCHS = []
+INTERNVIDEO2_ARCHS = {'internvideo2_1b'}
 SPLITS = ['train', 'test']
 
 
@@ -379,7 +380,7 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=32,
+        default=16,
         help="Số clip gộp trong một lần forward GPU (tăng dần đến khi gần đầy VRAM; giá trị cũ 256 "
         "chỉ đọc JPEG theo nhóm, không dùng hết GPU).",
     )
@@ -445,35 +446,57 @@ def main():
         if not os.path.isfile(upload_script):
             raise FileNotFoundError(f"upload_drive.py not found at {upload_script}")
 
+    def _upload_split_if_needed(args, upload_script, feature_dir, arch, split):
+        if not args.upload_drive:
+            return
+        split_dir = os.path.join(
+            feature_dir, f'LEN{args.clip_len}DIS0SPLIT{split}'
+        )
+        if os.path.isdir(split_dir):
+            cmd = [
+                sys.executable, upload_script,
+                "--path", os.path.abspath(split_dir),
+                "--folder-id", args.drive_folder_id,
+            ]
+            print(f"\n=== Upload {arch}/{split} to Drive: {' '.join(cmd)} ===")
+            subprocess.run(cmd, check=True)
+
     for arch in args.archs:
         feature_dir = os.path.join(args.feature_output, arch)
         os.makedirs(feature_dir, exist_ok=True)
         print(f"\n--- {arch} -> {feature_dir}/ ---")
 
-        model, feat_dim = create_feature_extractor(arch, args.clip_len, device=args.device)
-        print(f"Feature dim: {feat_dim}")
-
-        for split in args.splits:
-            extract_features_for_split(
-                split, store_dir, feature_dir, model,
-                args.clip_len, args.stride, args.device, args.batch_size
+        if arch in INTERNVIDEO2_ARCHS:
+            from InternVideo2_extract import (
+                load_internvideo2,
+                extract_features_for_split as iv2_extract,
+                INTERNVIDEO2_FEAT_DIM,
             )
-
-            if args.upload_drive:
-                split_dir = os.path.join(
-                    feature_dir, f'LEN{args.clip_len}DIS0SPLIT{split}'
+            iv2_model = load_internvideo2(device=args.device)
+            print(f"Feature dim: {INTERNVIDEO2_FEAT_DIM}")
+            for split in args.splits:
+                iv2_extract(
+                    split, store_dir, feature_dir, iv2_model,
+                    args.clip_len, args.stride, args.device, args.batch_size,
                 )
-                if os.path.isdir(split_dir):
-                    cmd = [
-                        sys.executable, upload_script,
-                        "--path", os.path.abspath(split_dir),
-                        "--folder-id", args.drive_folder_id,
-                    ]
-                    print(f"\n=== Upload {arch}/{split} to Drive: {' '.join(cmd)} ===")
-                    subprocess.run(cmd, check=True)
-
-        del model
-        torch.cuda.empty_cache()
+                _upload_split_if_needed(
+                    args, upload_script, feature_dir, arch, split
+                )
+            del iv2_model
+            torch.cuda.empty_cache()
+        else:
+            model, feat_dim = create_feature_extractor(arch, args.clip_len, device=args.device)
+            print(f"Feature dim: {feat_dim}")
+            for split in args.splits:
+                extract_features_for_split(
+                    split, store_dir, feature_dir, model,
+                    args.clip_len, args.stride, args.device, args.batch_size
+                )
+                _upload_split_if_needed(
+                    args, upload_script, feature_dir, arch, split
+                )
+            del model
+            torch.cuda.empty_cache()
 
     print(f"\nDone. Features saved at: {args.feature_output}/")
     for arch in args.archs:
