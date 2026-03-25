@@ -17,7 +17,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from util.io import load_json, load_text
 from model.T_Deed_Modules.shift import make_temporal_shift
+from huggingface_hub import login
 
+# Never hardcode HuggingFace tokens into the repository.
+# Use the `HF_TOKEN` environment variable (or `huggingface-cli login`) instead.
+HF_TOKEN = os.environ.get("HF_TOKEN")
+if HF_TOKEN:
+    login(token=HF_TOKEN)
 FPS_SN = 25
 OVERLAP_SNBA = 0.9
 STRIDE_SNBA = 4
